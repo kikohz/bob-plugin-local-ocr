@@ -1,4 +1,4 @@
-// bob-local-ocr: 运行在沙盒外的本地 OCR 服务，供 Bob 插件通过 HTTP 调用。
+// bob-local-ocr: 常驻的本地 OCR 服务，供 Bob 插件通过 HTTP 调用。
 // 只监听 127.0.0.1，使用系统 Vision 框架识别文字。
 //
 // POST /ocr     {"image": "<base64>", "languages": ["zh-Hans", "en-US"], "autoDetect": true}
@@ -40,11 +40,13 @@ struct OCRRequestBody: Decodable {
 
 enum OCRError: Error, CustomStringConvertible {
     case badImage
+    case modelCacheGone
     case vision(Error)
 
     var description: String {
         switch self {
         case .badImage: return "无法解码图片"
+        case .modelCacheGone: return "OCR 模型缓存被系统清理了（通常是磁盘空间不足），服务正在重建模型，请 1~2 分钟后重试"
         case .vision(let e): return "Vision 识别失败: \(e)"
         }
     }
@@ -62,6 +64,9 @@ func recognize(cgImage: CGImage, languages: [String], autoDetect: Bool) throws -
     do {
         try VNImageRequestHandler(cgImage: cgImage).perform([request])
     } catch {
+        // 磁盘空间不足时，系统（deleted 守护进程）会清掉 E5 模型编译缓存。已经加载过模型的进程
+        // 之后会一直报 e5rtError(..., 13)，不会自动重新编译，只能重启进程。
+        if "\(error)".contains("e5rtError") { throw OCRError.modelCacheGone }
         throw OCRError.vision(error)
     }
 
@@ -116,6 +121,52 @@ func prewarm() {
         log("预热 \(sample.languages.first ?? "")，耗时 \(Int(Date().timeIntervalSince(start) * 1000))ms")
     }
     log("预热完成，总耗时 \(Int(Date().timeIntervalSince(total) * 1000))ms")
+    watchModelCache()
+}
+
+// MARK: - 模型缓存自愈
+
+/// Vision 把编译好的模型缓存在 ~/Library/Caches/<进程名>/com.apple.e5rt.e5bundlecache。
+let modelCacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+    .appendingPathComponent(ProcessInfo.processInfo.processName)
+    .appendingPathComponent("com.apple.e5rt.e5bundlecache")
+
+func modelCacheFileCount() -> Int {
+    let enumerator = FileManager.default.enumerator(
+        at: modelCacheDir, includingPropertiesForKeys: [.isRegularFileKey]
+    )
+    var count = 0
+    while let url = enumerator?.nextObject() as? URL {
+        if (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true { count += 1 }
+    }
+    return count
+}
+
+/// 退出进程，由 launchd（KeepAlive）重新拉起，重新启动后的预热会重建模型。
+/// 稍等一下再退出，让正在发送的响应先发出去。
+func restartForRebuild(reason: String) {
+    log("\(reason)，重启服务以重建模型")
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { exit(75) }
+}
+
+var modelCacheTimer: DispatchSourceTimer?
+
+/// 每分钟检查一次缓存文件数，发现被系统清理后主动重启，赶在用户下一次截图之前把模型重新编译好。
+func watchModelCache() {
+    let baseline = modelCacheFileCount()
+    log("模型缓存文件数: \(baseline)")
+    guard baseline > 0 else { return }
+    let timer = DispatchSource.makeTimerSource(queue: .main)
+    timer.schedule(deadline: .now() + 60, repeating: 60)
+    timer.setEventHandler {
+        let current = modelCacheFileCount()
+        if current < baseline {
+            timer.cancel()
+            restartForRebuild(reason: "模型缓存被系统清理（文件数 \(baseline) -> \(current)）")
+        }
+    }
+    timer.resume()
+    modelCacheTimer = timer
 }
 
 // MARK: - HTTP
@@ -153,7 +204,9 @@ func parseRequest(_ buffer: Data) throws -> HTTPRequest? {
 }
 
 func send(_ connection: NWConnection, status: Int, json: Data) {
-    let reason = [200: "OK", 400: "Bad Request", 404: "Not Found", 500: "Internal Server Error"][status] ?? "Error"
+    let reason = [
+        200: "OK", 400: "Bad Request", 404: "Not Found", 500: "Internal Server Error", 503: "Service Unavailable",
+    ][status] ?? "Error"
     var response = Data("HTTP/1.1 \(status) \(reason)\r\n".utf8)
     response.append(Data("Content-Type: application/json; charset=utf-8\r\n".utf8))
     response.append(Data("Content-Length: \(json.count)\r\nConnection: close\r\n\r\n".utf8))
@@ -185,6 +238,9 @@ func handle(_ request: HTTPRequest, on connection: NWConnection) {
                 let elapsed = Int(Date().timeIntervalSince(start) * 1000)
                 log("识别 \(cgImage.width)x\(cgImage.height) -> \(lines.count) 行，耗时 \(elapsed)ms")
                 send(connection, status: 200, json: try JSONEncoder().encode(OCRResponse(texts: lines, elapsedMs: elapsed)))
+            } catch OCRError.modelCacheGone {
+                sendError(connection, status: 503, OCRError.modelCacheGone.description)
+                restartForRebuild(reason: "识别时发现模型缓存已失效")
             } catch let error as OCRError {
                 log("识别失败: \(error)")
                 sendError(connection, status: 500, error.description)
