@@ -1,0 +1,24 @@
+{
+  "identifier": "com.kikohz.bob.localocr",
+  "version": "0.1.0",
+  "category": "ocr",
+  "name": "本地 OCR",
+  "summary": "调用沙盒外常驻的本地 Vision 服务识别文字，解决 macOS 27 上 Bob 系统 OCR 每次都要等几十秒的问题",
+  "author": "kikohz",
+  "homepage": "https://github.com/kikohz/bob-plugin-local-ocr",
+  "appcast": "https://github.com/kikohz/bob-plugin-local-ocr/raw/main/appcast.json",
+  "minBobVersion": "1.20.0",
+  "options": [
+    {
+      "identifier": "port",
+      "type": "text",
+      "title": "服务端口",
+      "defaultValue": "50888",
+      "desc": "本地 OCR 服务监听的端口，需与安装服务时的 BOB_OCR_PORT 一致",
+      "textConfig": {
+        "type": "visible",
+        "placeholderText": "50888"
+      }
+    }
+  ]
+}

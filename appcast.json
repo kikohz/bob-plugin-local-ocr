@@ -1,0 +1,13 @@
+{
+  "identifier": "com.kikohz.bob.localocr",
+  "versions": [
+    {
+      "version": "0.1.0",
+      "desc": "首个版本：通过本地 Vision 服务识别文字，解决 macOS 27 上系统 OCR 很慢的问题",
+      "sha256": "42a1e8aff7546b1f96501d878c7400d5478516caf9c053ebb7df1c8834814724",
+      "url": "https://github.com/kikohz/bob-plugin-local-ocr/releases/download/v0.1.0/bob-plugin-local-ocr-v0.1.0.bobplugin",
+      "minBobVersion": "1.20.0",
+      "timestamp": 1791407551561
+    }
+  ]
+}
